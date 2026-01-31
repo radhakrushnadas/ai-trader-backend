@@ -1,12 +1,8 @@
-<<<<<<< HEAD
-fastapi==0.102.0
-uvicorn==0.23.2
-yfinance==0.2.27
-pandas==2.1.1
-ta==0.10.2
-=======
-fastapi
-uvicorn
-pandas>=2.2
-yfinance
->>>>>>> 16f7488 (Flatten backend structure for Render)
+fastapi==0.101.1
+uvicorn==0.25.0
+pydantic==2.2.2
+requests==2.31.0
+python-dotenv==1.0.1
+sqlalchemy==2.0.22
+databases==0.7.3
+aiohttp==3.9.9
