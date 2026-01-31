@@ -1,5 +1,12 @@
+<<<<<<< HEAD
 fastapi==0.102.0
 uvicorn==0.23.2
 yfinance==0.2.27
 pandas==2.1.1
 ta==0.10.2
+=======
+fastapi
+uvicorn
+pandas>=2.2
+yfinance
+>>>>>>> 16f7488 (Flatten backend structure for Render)

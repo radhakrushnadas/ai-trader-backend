@@ -2,7 +2,10 @@
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+HEAD
 import math
+=======
+16f7488 (Flatten backend structure for Render)
 
 app = FastAPI()
 
@@ -29,7 +32,11 @@ def safe(v):
         if v is None or pd.isna(v):
             return None
         return float(v)
+<<<<<<< HEAD
     except:
+=======
+    except Exception:
+>>>>>>> 16f7488 (Flatten backend structure for Render)
         return None
 
 def nearest_strike(price, step):
@@ -90,8 +97,11 @@ def option_delta(option_type):
 
 def pick_strike(spot, step, mode):
     atm = nearest_strike(spot, step)
+<<<<<<< HEAD
     if mode == "ATM":
         return atm
+=======
+>>>>>>> 16f7488 (Flatten backend structure for Render)
     if mode == "ITM":
         return atm - step
     if mode == "OTM":
@@ -103,10 +113,13 @@ def start_option_trade(signal, spot, symbol, mode="ATM"):
     opt_type = "CE" if signal == "BUY" else "PE"
     strike = pick_strike(spot, step, mode)
     premium = option_premium(spot)
+<<<<<<< HEAD
     delta = option_delta(opt_type)
 
     if abs(delta) < 0.4:
         return None  # Delta filter
+=======
+>>>>>>> 16f7488 (Flatten backend structure for Render)
 
     return {
         "symbol": symbol,
@@ -141,6 +154,7 @@ def manage_trade(trade, premium):
 # ================= DATA =================
 
 def fetch(symbol, interval):
+<<<<<<< HEAD
     yf_symbol = INDEX_MAP[symbol]
     df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
     if isinstance(df.columns, pd.MultiIndex):
@@ -149,14 +163,50 @@ def fetch(symbol, interval):
 
 # ================= API =================
 
+=======
+    df = yf.download(
+        INDEX_MAP[symbol],
+        interval=interval,
+        period="7d",
+        progress=False
+    )
+
+    if df.empty:
+        return df
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df = df.reset_index()
+    df.rename(columns={"Date": "Datetime"}, inplace=True)
+    return df
+
+# ================= API =================
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+>>>>>>> 16f7488 (Flatten backend structure for Render)
 @app.get("/chart/{symbol}")
 def chart(symbol: str):
     symbol = symbol.upper()
     if symbol not in INDEX_MAP:
         return {"error": "Only index options supported"}
 
+<<<<<<< HEAD
     df5 = add_indicators(fetch(symbol, "5m"))
     df15 = add_indicators(fetch(symbol, "15m"))
+=======
+    df5 = fetch(symbol, "5m")
+    df15 = fetch(symbol, "15m")
+
+    if df5.empty or df15.empty:
+        return {"error": "Market data unavailable"}
+
+    df5 = add_indicators(df5)
+    df15 = add_indicators(df15)
+>>>>>>> 16f7488 (Flatten backend structure for Render)
 
     capital = START_CAPITAL
     trade = None
@@ -173,16 +223,27 @@ def chart(symbol: str):
         row15 = {"EMA9": safe(r15["EMA9"]), "EMA21": safe(r15["EMA21"]), "RSI": safe(r15["RSI"])}
         prev15 = {"EMA9": safe(p15["EMA9"]), "EMA21": safe(p15["EMA21"]), "RSI": safe(p15["RSI"])}
 
+<<<<<<< HEAD
         sig5 = final_signal(row5, prev5)
         sig15 = final_signal(row15, prev15)
 
         signal = sig5 if sig5 == sig15 else "NONE"
+=======
+        sig = final_signal(row5, prev5)
+        if sig != final_signal(row15, prev15):
+            sig = "NONE"
+>>>>>>> 16f7488 (Flatten backend structure for Render)
 
         spot = safe(r5["Close"])
         premium = option_premium(spot)
 
+<<<<<<< HEAD
         if trade is None and signal != "NONE":
             trade = start_option_trade(signal, spot, symbol, mode="ATM")
+=======
+        if trade is None and sig != "NONE":
+            trade = start_option_trade(sig, spot, symbol)
+>>>>>>> 16f7488 (Flatten backend structure for Render)
 
         if trade:
             trade = manage_trade(trade, premium)
@@ -196,7 +257,11 @@ def chart(symbol: str):
             "time": r5["Datetime"].isoformat(),
             "spot": spot,
             "premium": round(premium, 2),
+<<<<<<< HEAD
             "signal": signal,
+=======
+            "signal": sig,
+>>>>>>> 16f7488 (Flatten backend structure for Render)
             "capital": round(capital, 2),
             "trade": trade
         })
