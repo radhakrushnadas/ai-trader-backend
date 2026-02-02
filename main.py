@@ -1,10 +1,17 @@
-﻿from fastapi import FastAPI
-import yfinance as yf
-import pandas as pd
+from fastapi import FastAPI
 from datetime import datetime, timedelta
 import math
 
-app = FastAPI()
+app = FastAPI(title="AI Trader Backend")
+
+# ---------------- SAFE IMPORTS ----------------
+
+try:
+    import yfinance as yf
+    import pandas as pd
+except Exception as e:
+    yf = None
+    pd = None
 
 # ================= CONFIG =================
 
@@ -90,8 +97,6 @@ def option_delta(option_type):
 
 def pick_strike(spot, step, mode):
     atm = nearest_strike(spot, step)
-    if mode == "ATM":
-        return atm
     if mode == "ITM":
         return atm - step
     if mode == "OTM":
@@ -106,7 +111,7 @@ def start_option_trade(signal, spot, symbol, mode="ATM"):
     delta = option_delta(opt_type)
 
     if abs(delta) < 0.4:
-        return None  # Delta filter
+        return None
 
     return {
         "symbol": symbol,
@@ -141,6 +146,9 @@ def manage_trade(trade, premium):
 # ================= DATA =================
 
 def fetch(symbol, interval):
+    if yf is None or pd is None:
+        return None
+
     df = yf.download(
         INDEX_MAP[symbol],
         interval=interval,
@@ -162,10 +170,13 @@ def fetch(symbol, interval):
 
 @app.get("/")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "message": "AI Trader Backend LIVE 🚀"}
 
 @app.get("/chart/{symbol}")
 def chart(symbol: str):
+    if yf is None or pd is None:
+        return {"error": "Market data engine not available"}
+
     symbol = symbol.upper()
     if symbol not in INDEX_MAP:
         return {"error": "Only index options supported"}
@@ -173,7 +184,7 @@ def chart(symbol: str):
     df5 = fetch(symbol, "5m")
     df15 = fetch(symbol, "15m")
 
-    if df5.empty or df15.empty:
+    if df5 is None or df15 is None or df5.empty or df15.empty:
         return {"error": "Market data unavailable"}
 
     df5 = add_indicators(df5)
@@ -185,8 +196,8 @@ def chart(symbol: str):
     candles = []
 
     for i in range(1, min(len(df5), len(df15))):
-        r5, p5 = df5.iloc[i], df5.iloc[i-1]
-        r15, p15 = df15.iloc[i], df15.iloc[i-1]
+        r5, p5 = df5.iloc[i], df5.iloc[i - 1]
+        r15, p15 = df15.iloc[i], df15.iloc[i - 1]
 
         row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
         prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
