@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -e
+
+# -------------------------------
+# Force Python 3.13 installation
+# -------------------------------
+PYTHON_VERSION=3.13.4
+
+echo "Installing Python $PYTHON_VERSION..."
+curl -sSL https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tgz -o python.tgz
+tar -xzf python.tgz
+cd Python-$PYTHON_VERSION
+./configure --enable-optimizations
+make -j$(nproc)
+sudo make altinstall
+cd ..
+export PATH="/usr/local/bin:$PATH"
+python3.13 --version
+
+# -------------------------------
+# Upgrade pip and install dependencies
+# -------------------------------
+python3.13 -m ensurepip --upgrade
+python3.13 -m pip install --upgrade pip
+python3.13 -m pip install -r requirements.txt
+
+# -------------------------------
+# Done
+# -------------------------------
+echo "Python $PYTHON_VERSION and dependencies installed successfully."
