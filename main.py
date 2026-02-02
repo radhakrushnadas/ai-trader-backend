@@ -1,7 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+import random
 
 app = FastAPI()
 
@@ -105,7 +106,7 @@ def start_option_trade(signal, spot, symbol, mode="ATM"):
     delta = option_delta(opt_type)
 
     if abs(delta) < 0.4:
-        return None  # Delta filter
+        return None
 
     return {
         "symbol": symbol,
@@ -121,30 +122,31 @@ def start_option_trade(signal, spot, symbol, mode="ATM"):
 
 def manage_trade(trade, premium):
     entry = trade["entry"]
-
     if not trade["trail"] and premium >= entry * 1.1:
         trade["sl"] = entry
         trade["trail"] = True
-
     if trade["trail"]:
         trade["sl"] = max(trade["sl"], premium * 0.95)
-
     if premium <= trade["sl"]:
         trade["status"] = "SL HIT"
-
     if premium >= trade["target"]:
         trade["status"] = "TARGET HIT"
-
     return trade
 
 # ================= DATA =================
 
-def fetch(symbol, interval):
-    yf_symbol = INDEX_MAP[symbol]
-    df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.reset_index()
+def fetch(symbol, interval, paper=False):
+    if paper:  # Mock data for paper trading
+        times = pd.date_range(end=datetime.now(), periods=100, freq="5min")
+        close = pd.Series([10000 + random.randint(-50, 50) for _ in range(100)])
+        df = pd.DataFrame({"Datetime": times, "Close": close})
+        return df
+    else:
+        yf_symbol = INDEX_MAP[symbol]
+        df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.reset_index()
 
 # ================= API =================
 
@@ -153,13 +155,13 @@ def health():
     return {"status": "ok"}
 
 @app.get("/chart/{symbol}")
-def chart(symbol: str):
+def chart(symbol: str, paper: bool = Query(False, description="Enable paper trading mode")):
     symbol = symbol.upper()
     if symbol not in INDEX_MAP:
         return {"error": "Only index options supported"}
 
-    df5 = add_indicators(fetch(symbol, "5m"))
-    df15 = add_indicators(fetch(symbol, "15m"))
+    df5 = add_indicators(fetch(symbol, "5m", paper=paper))
+    df15 = add_indicators(fetch(symbol, "15m", paper=paper))
 
     capital = START_CAPITAL
     trade = None
@@ -172,13 +174,11 @@ def chart(symbol: str):
 
         row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
         prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
-
         row15 = {"EMA9": safe(r15["EMA9"]), "EMA21": safe(r15["EMA21"]), "RSI": safe(r15["RSI"])}
         prev15 = {"EMA9": safe(p15["EMA9"]), "EMA21": safe(p15["EMA21"]), "RSI": safe(p15["RSI"])}
 
         sig5 = final_signal(row5, prev5)
         sig15 = final_signal(row15, prev15)
-
         signal = sig5 if sig5 == sig15 else "NONE"
 
         spot = safe(r5["Close"])
