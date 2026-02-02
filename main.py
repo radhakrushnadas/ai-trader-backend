@@ -191,6 +191,90 @@ def chart(symbol: str):
         "capital": round(capital, 2),
         "journal": journal,
         "candles": candles[-120:]
+    }
+
+def manage_trade(trade, premium):
+    entry = trade["entry"]
+    if not trade["trail"] and premium >= entry * 1.1:
+        trade["sl"] = entry
+        trade["trail"] = True
+    if trade["trail"]:
+        trade["sl"] = max(trade["sl"], premium * 0.95)
+    if premium <= trade["sl"]:
+        trade["status"] = "SL HIT"
+    if premium >= trade["target"]:
+        trade["status"] = "TARGET HIT"
+    return trade
+
+# ================= DATA =================
+def fetch(symbol, interval):
+    yf_symbol = INDEX_MAP[symbol]
+    df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df.reset_index()
+
+# ================= API =================
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+@app.get("/chart/{symbol}")
+def chart(symbol: str):
+    symbol = symbol.upper()
+    if symbol not in INDEX_MAP:
+        return {"error": "Only index options supported"}
+
+    df5 = add_indicators(fetch(symbol, "5m"))
+    df15 = add_indicators(fetch(symbol, "15m"))
+
+    capital = START_CAPITAL
+    trade = None
+    journal = []
+    candles = []
+
+    for i in range(1, min(len(df5), len(df15))):
+        r5, p5 = df5.iloc[i], df5.iloc[i-1]
+        r15, p15 = df15.iloc[i], df15.iloc[i-1]
+
+        row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
+        prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
+
+        row15 = {"EMA9": safe(r15["EMA9"]), "EMA21": safe(r15["EMA21"]), "RSI": safe(r15["RSI"])}
+        prev15 = {"EMA9": safe(p15["EMA9"]), "EMA21": safe(p15["EMA21"]), "RSI": safe(p15["RSI"])}
+
+        sig5 = final_signal(row5, prev5)
+        sig15 = final_signal(row15, prev15)
+        signal = sig5 if sig5 == sig15 else "NONE"
+
+        spot = safe(r5["Close"])
+        premium = option_premium(spot)
+
+        if trade is None and signal != "NONE":
+            trade = start_option_trade(signal, spot, symbol, mode="ATM")
+
+        if trade:
+            trade = manage_trade(trade, premium)
+            if trade["status"] != "OPEN":
+                pnl = premium - trade["entry"]
+                capital += pnl
+                journal.append({**trade, "exit": round(premium, 2), "pnl": round(pnl, 2)})
+                trade = None
+
+        candles.append({
+            "time": r5["Datetime"].isoformat(),
+            "spot": spot,
+            "premium": round(premium, 2),
+            "signal": signal,
+            "capital": round(capital, 2),
+            "trade": trade
+        })
+
+    return {
+        "symbol": symbol,
+        "capital": round(capital, 2),
+        "journal": journal,
+        "candles": candles[-120:]
     }    return {
         "symbol": symbol,
         "expiry": next_expiry(),
