@@ -6,12 +6,15 @@ from datetime import datetime, timedelta
 app = FastAPI()
 
 # ================= CONFIG =================
+
 START_CAPITAL = 100000
+
 INDEX_MAP = {
     "NIFTY": "^NSEI",
     "BANKNIFTY": "^NSEBANK",
     "FINNIFTY": "NIFTY_FIN_SERVICE.NS"
 }
+
 STRIKE_STEP = {
     "NIFTY": 50,
     "FINNIFTY": 50,
@@ -19,6 +22,7 @@ STRIKE_STEP = {
 }
 
 # ================= UTIL =================
+
 def safe(v):
     try:
         if v is None or pd.isna(v):
@@ -38,9 +42,11 @@ def next_expiry():
     return (today + timedelta(days=days)).strftime("%d-%b-%Y")
 
 # ================= INDICATORS =================
+
 def add_indicators(df):
     df["EMA9"] = df["Close"].ewm(span=9).mean()
     df["EMA21"] = df["Close"].ewm(span=21).mean()
+
     delta = df["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -49,6 +55,7 @@ def add_indicators(df):
     return df
 
 # ================= STRATEGY =================
+
 def ema_signal(row, prev):
     if prev is None:
         return "NONE"
@@ -73,6 +80,7 @@ def final_signal(row, prev):
     return s1 if s1 == s2 else "NONE"
 
 # ================= OPTION LOGIC =================
+
 def option_premium(spot):
     return max(40, spot * 0.004)
 
@@ -95,300 +103,9 @@ def start_option_trade(signal, spot, symbol, mode="ATM"):
     strike = pick_strike(spot, step, mode)
     premium = option_premium(spot)
     delta = option_delta(opt_type)
-    if abs(delta) < 0.4:
-        return None
-    return {
-        "symbol": symbol,
-        "expiry": next_expiry(),
-        "strike": strike,
-        "type": opt_type,
-        "entry": round(premium, 2),
-        "sl": round(premium * 0.7, 2),
-        "target": round(premium * 1.5, 2),
-        "trail": False,
-        "status": "OPEN"
-    }
-
-def manage_trade(trade, premium):
-    entry = trade["entry"]
-    if not trade["trail"] and premium >= entry * 1.1:
-        trade["sl"] = entry
-        trade["trail"] = True
-    if trade["trail"]:
-        trade["sl"] = max(trade["sl"], premium * 0.95)
-    if premium <= trade["sl"]:
-        trade["status"] = "SL HIT"
-    if premium >= trade["target"]:
-        trade["status"] = "TARGET HIT"
-    return trade
-
-# ================= DATA =================
-def fetch(symbol, interval):
-    yf_symbol = INDEX_MAP[symbol]
-    df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.reset_index()
-
-# ================= API =================
-@app.get("/")
-def health():
-    return {"status": "ok"}
-
-@app.get("/chart/{symbol}")
-def chart(symbol: str):
-    symbol = symbol.upper()
-    if symbol not in INDEX_MAP:
-        return {"error": "Only index options supported"}
-
-    df5 = add_indicators(fetch(symbol, "5m"))
-    df15 = add_indicators(fetch(symbol, "15m"))
-
-    capital = START_CAPITAL
-    trade = None
-    journal = []
-    candles = []
-
-    for i in range(1, min(len(df5), len(df15))):
-        r5, p5 = df5.iloc[i], df5.iloc[i-1]
-        r15, p15 = df15.iloc[i], df15.iloc[i-1]
-
-        row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
-        prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
-
-        row15 = {"EMA9": safe(r15["EMA9"]), "EMA21": safe(r15["EMA21"]), "RSI": safe(r15["RSI"])}
-        prev15 = {"EMA9": safe(p15["EMA9"]), "EMA21": safe(p15["EMA21"]), "RSI": safe(p15["RSI"])}
-
-        sig5 = final_signal(row5, prev5)
-        sig15 = final_signal(row15, prev15)
-        signal = sig5 if sig5 == sig15 else "NONE"
-
-        spot = safe(r5["Close"])
-        premium = option_premium(spot)
-
-        if trade is None and signal != "NONE":
-            trade = start_option_trade(signal, spot, symbol, mode="ATM")
-
-        if trade:
-            trade = manage_trade(trade, premium)
-            if trade["status"] != "OPEN":
-                pnl = premium - trade["entry"]
-                capital += pnl
-                journal.append({**trade, "exit": round(premium, 2), "pnl": round(pnl, 2)})
-                trade = None
-
-        candles.append({
-            "time": r5["Datetime"].isoformat(),
-            "spot": spot,
-            "premium": round(premium, 2),
-            "signal": signal,
-            "capital": round(capital, 2),
-            "trade": trade
-        })
-
-    return {
-        "symbol": symbol,
-        "capital": round(capital, 2),
-        "journal": journal,
-        "candles": candles[-120:]
-    }
-
-def manage_trade(trade, premium):
-    entry = trade["entry"]
-    if not trade["trail"] and premium >= entry * 1.1:
-        trade["sl"] = entry
-        trade["trail"] = True
-    if trade["trail"]:
-        trade["sl"] = max(trade["sl"], premium * 0.95)
-    if premium <= trade["sl"]:
-        trade["status"] = "SL HIT"
-    if premium >= trade["target"]:
-        trade["status"] = "TARGET HIT"
-    return trade
-
-# ================= DATA =================
-def fetch(symbol, interval):
-    yf_symbol = INDEX_MAP[symbol]
-    df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.reset_index()
-
-# ================= API =================
-@app.get("/")
-def health():
-    return {"status": "ok"}
-
-@app.get("/chart/{symbol}")
-def chart(symbol: str):
-    symbol = symbol.upper()
-    if symbol not in INDEX_MAP:
-        return {"error": "Only index options supported"}
-
-    df5 = add_indicators(fetch(symbol, "5m"))
-    df15 = add_indicators(fetch(symbol, "15m"))
-
-    capital = START_CAPITAL
-    trade = None
-    journal = []
-    candles = []
-
-    for i in range(1, min(len(df5), len(df15))):
-        r5, p5 = df5.iloc[i], df5.iloc[i-1]
-        r15, p15 = df15.iloc[i], df15.iloc[i-1]
-
-        row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
-        prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
-
-        row15 = {"EMA9": safe(r15["EMA9"]), "EMA21": safe(r15["EMA21"]), "RSI": safe(r15["RSI"])}
-        prev15 = {"EMA9": safe(p15["EMA9"]), "EMA21": safe(p15["EMA21"]), "RSI": safe(p15["RSI"])}
-
-        sig5 = final_signal(row5, prev5)
-        sig15 = final_signal(row15, prev15)
-        signal = sig5 if sig5 == sig15 else "NONE"
-
-        spot = safe(r5["Close"])
-        premium = option_premium(spot)
-
-        if trade is None and signal != "NONE":
-            trade = start_option_trade(signal, spot, symbol, mode="ATM")
-
-        if trade:
-            trade = manage_trade(trade, premium)
-            if trade["status"] != "OPEN":
-                pnl = premium - trade["entry"]
-                capital += pnl
-                journal.append({**trade, "exit": round(premium, 2), "pnl": round(pnl, 2)})
-                trade = None
-
-        candles.append({
-            "time": r5["Datetime"].isoformat(),
-            "spot": spot,
-            "premium": round(premium, 2),
-            "signal": signal,
-            "capital": round(capital, 2),
-            "trade": trade
-        })
-
-    return {
-        "symbol": symbol,
-        "capital": round(capital, 2),
-        "journal": journal,
-        "candles": candles[-120:]
-    }    return {
-        "symbol": symbol,
-        "expiry": next_expiry(),
-        "strike": strike,
-        "type": opt_type,
-        "entry": round(premium, 2),
-        "sl": round(premium * 0.7, 2),
-        "target": round(premium * 1.5, 2),
-        "trail": False,
-        "status": "OPEN"
-    }
-
-def manage_trade(trade, premium):
-    entry = trade["entry"]
-
-    if not trade["trail"] and premium >= entry * 1.1:
-        trade["sl"] = entry
-        trade["trail"] = True
-
-    if trade["trail"]:
-        trade["sl"] = max(trade["sl"], premium * 0.95)
-
-    if premium <= trade["sl"]:
-        trade["status"] = "SL HIT"
-
-    if premium >= trade["target"]:
-        trade["status"] = "TARGET HIT"
-
-    return trade
-
-# ================= DATA =================
-
-def fetch(symbol, interval):
-    yf_symbol = INDEX_MAP[symbol]
-    df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.reset_index()
-
-# ================= API =================
-
-@app.get("/")
-def health():
-    return {"status": "ok"}
-
-@app.get("/chart/{symbol}")
-def chart(symbol: str):
-    symbol = symbol.upper()
-    if symbol not in INDEX_MAP:
-        return {"error": "Only index options supported"}
-
-    df5 = add_indicators(fetch(symbol, "5m"))
-    df15 = add_indicators(fetch(symbol, "15m"))
-
-    capital = START_CAPITAL
-    trade = None
-    journal = []
-    candles = []
-
-    for i in range(1, min(len(df5), len(df15))):
-        r5, p5 = df5.iloc[i], df5.iloc[i-1]
-        r15, p15 = df15.iloc[i], df15.iloc[i-1]
-
-        row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
-        prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
-
-        row15 = {"EMA9": safe(r15["EMA9"]), "EMA21": safe(r15["EMA21"]), "RSI": safe(r15["RSI"])}
-        prev15 = {"EMA9": safe(p15["EMA9"]), "EMA21": safe(p15["EMA21"]), "RSI": safe(p15["RSI"])}
-
-        sig5 = final_signal(row5, prev5)
-        sig15 = final_signal(row15, prev15)
-
-        signal = sig5 if sig5 == sig15 else "NONE"
-
-        spot = safe(r5["Close"])
-        premium = option_premium(spot)
-
-        if trade is None and signal != "NONE":
-            trade = start_option_trade(signal, spot, symbol, mode="ATM")
-
-        if trade:
-            trade = manage_trade(trade, premium)
-            if trade["status"] != "OPEN":
-                pnl = premium - trade["entry"]
-                capital += pnl
-                journal.append({**trade, "exit": round(premium, 2), "pnl": round(pnl, 2)})
-                trade = None
-
-        candles.append({
-            "time": r5["Datetime"].isoformat(),
-            "spot": spot,
-            "premium": round(premium, 2),
-            "signal": signal,
-            "capital": round(capital, 2),
-            "trade": trade
-        })
-
-    return {
-        "symbol": symbol,
-        "capital": round(capital, 2),
-        "journal": journal,
-        "candles": candles[-120:]
-    }        })
-
-    return {
-        "symbol": symbol,
-        "capital": round(capital, 2),
-        "journal": journal,
-        "candles": candles[-120:]
-    }    premium = option_premium(spot)
-    delta = option_delta(opt_type)
 
     if abs(delta) < 0.4:
-        return None
+        return None  # Delta filter
 
     return {
         "symbol": symbol,
@@ -423,49 +140,26 @@ def manage_trade(trade, premium):
 # ================= DATA =================
 
 def fetch(symbol, interval):
-    if yf is None or pd is None:
-        return None
-
-    df = yf.download(
-        INDEX_MAP[symbol],
-        interval=interval,
-        period="7d",
-        progress=False
-    )
-
-    if df.empty:
-        return df
-
+    yf_symbol = INDEX_MAP[symbol]
+    df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-
-    df = df.reset_index()
-    df.rename(columns={"Date": "Datetime"}, inplace=True)
-    return df
+    return df.reset_index()
 
 # ================= API =================
 
 @app.get("/")
 def health():
-    return {"status": "ok", "message": "AI Trader Backend LIVE 🚀"}
+    return {"status": "ok"}
 
 @app.get("/chart/{symbol}")
 def chart(symbol: str):
-    if yf is None or pd is None:
-        return {"error": "Market data engine not available"}
-
     symbol = symbol.upper()
     if symbol not in INDEX_MAP:
         return {"error": "Only index options supported"}
 
-    df5 = fetch(symbol, "5m")
-    df15 = fetch(symbol, "15m")
-
-    if df5 is None or df15 is None or df5.empty or df15.empty:
-        return {"error": "Market data unavailable"}
-
-    df5 = add_indicators(df5)
-    df15 = add_indicators(df15)
+    df5 = add_indicators(fetch(symbol, "5m"))
+    df15 = add_indicators(fetch(symbol, "15m"))
 
     capital = START_CAPITAL
     trade = None
@@ -473,8 +167,8 @@ def chart(symbol: str):
     candles = []
 
     for i in range(1, min(len(df5), len(df15))):
-        r5, p5 = df5.iloc[i], df5.iloc[i - 1]
-        r15, p15 = df15.iloc[i], df15.iloc[i - 1]
+        r5, p5 = df5.iloc[i], df5.iloc[i-1]
+        r15, p15 = df15.iloc[i], df15.iloc[i-1]
 
         row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
         prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
@@ -482,15 +176,16 @@ def chart(symbol: str):
         row15 = {"EMA9": safe(r15["EMA9"]), "EMA21": safe(r15["EMA21"]), "RSI": safe(r15["RSI"])}
         prev15 = {"EMA9": safe(p15["EMA9"]), "EMA21": safe(p15["EMA21"]), "RSI": safe(p15["RSI"])}
 
-        sig = final_signal(row5, prev5)
-        if sig != final_signal(row15, prev15):
-            sig = "NONE"
+        sig5 = final_signal(row5, prev5)
+        sig15 = final_signal(row15, prev15)
+
+        signal = sig5 if sig5 == sig15 else "NONE"
 
         spot = safe(r5["Close"])
         premium = option_premium(spot)
 
-        if trade is None and sig != "NONE":
-            trade = start_option_trade(sig, spot, symbol)
+        if trade is None and signal != "NONE":
+            trade = start_option_trade(signal, spot, symbol, mode="ATM")
 
         if trade:
             trade = manage_trade(trade, premium)
@@ -504,7 +199,7 @@ def chart(symbol: str):
             "time": r5["Datetime"].isoformat(),
             "spot": spot,
             "premium": round(premium, 2),
-            "signal": sig,
+            "signal": signal,
             "capital": round(capital, 2),
             "trade": trade
         })
