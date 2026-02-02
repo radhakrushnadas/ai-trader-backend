@@ -1,14 +1,14 @@
 # ----------------------------
-# Dockerfile for ai-trader-backend
+# Optimized Dockerfile for ai-trader-backend
 # ----------------------------
 
-# Use official Python 3.11 slim image
-FROM python:3.11-slim
+# Stage 1: Build stage
+FROM python:3.11-slim AS build
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies needed to build some Python packages
+# Install build dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -16,16 +16,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
+# Copy requirements and install Python packages in build stage
 COPY requirements.txt .
 RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+RUN pip install --prefix=/install -r requirements.txt
 
-# Copy the rest of your app code
+# Stage 2: Final runtime image
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy only installed packages from build stage
+COPY --from=build /install /usr/local
+
+# Copy application code
 COPY . .
 
 # Expose port for Uvicorn
 EXPOSE 8000
 
-# Run the FastAPI app using Uvicorn
+# Run FastAPI app
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
