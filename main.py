@@ -1,12 +1,14 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+import os
 
 app = FastAPI()
 
 # ================= CONFIG =================
 START_CAPITAL = 100000
+CACHE_DIR = "cache_data"  # store cached CSVs
 
 INDEX_MAP = {
     "NIFTY": "^NSEI",
@@ -19,6 +21,8 @@ STRIKE_STEP = {
     "FINNIFTY": 50,
     "BANKNIFTY": 100
 }
+
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ================= UTIL =================
 def safe(v):
@@ -43,6 +47,7 @@ def next_expiry():
 def add_indicators(df):
     df["EMA9"] = df["Close"].ewm(span=9).mean()
     df["EMA21"] = df["Close"].ewm(span=21).mean()
+
     delta = df["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -52,15 +57,21 @@ def add_indicators(df):
 
 # ================= STRATEGY =================
 def ema_signal(row, prev):
-    if prev is None: return "NONE"
-    if prev["EMA9"] < prev["EMA21"] and row["EMA9"] > row["EMA21"]: return "BUY"
-    if prev["EMA9"] > prev["EMA21"] and row["EMA9"] < row["EMA21"]: return "SELL"
+    if prev is None:
+        return "NONE"
+    if prev["EMA9"] < prev["EMA21"] and row["EMA9"] > row["EMA21"]:
+        return "BUY"
+    if prev["EMA9"] > prev["EMA21"] and row["EMA9"] < row["EMA21"]:
+        return "SELL"
     return "NONE"
 
 def rsi_filter(row):
-    if row["RSI"] is None: return "NONE"
-    if row["RSI"] < 30: return "BUY"
-    if row["RSI"] > 70: return "SELL"
+    if row["RSI"] is None:
+        return "NONE"
+    if row["RSI"] < 30:
+        return "BUY"
+    if row["RSI"] > 70:
+        return "SELL"
     return "NONE"
 
 def final_signal(row, prev):
@@ -69,13 +80,20 @@ def final_signal(row, prev):
     return s1 if s1 == s2 else "NONE"
 
 # ================= OPTION LOGIC =================
-def option_premium(spot): return max(40, spot * 0.004)
-def option_delta(option_type): return 0.55 if option_type == "CE" else -0.55
+def option_premium(spot):
+    return max(40, spot * 0.004)
+
+def option_delta(option_type):
+    return 0.55 if option_type == "CE" else -0.55
+
 def pick_strike(spot, step, mode):
     atm = nearest_strike(spot, step)
-    if mode == "ATM": return atm
-    if mode == "ITM": return atm - step
-    if mode == "OTM": return atm + step
+    if mode == "ATM":
+        return atm
+    if mode == "ITM":
+        return atm - step
+    if mode == "OTM":
+        return atm + step
     return atm
 
 def start_option_trade(signal, spot, symbol, mode="ATM"):
@@ -84,26 +102,27 @@ def start_option_trade(signal, spot, symbol, mode="ATM"):
     strike = pick_strike(spot, step, mode)
     premium = option_premium(spot)
     delta = option_delta(opt_type)
-    if abs(delta) < 0.4: return None
+    if abs(delta) < 0.4:
+        return None
     return {
         "symbol": symbol,
         "expiry": next_expiry(),
         "strike": strike,
         "type": opt_type,
-        "entry": round(premium,2),
-        "sl": round(premium*0.7,2),
-        "target": round(premium*1.5,2),
+        "entry": round(premium, 2),
+        "sl": round(premium * 0.7, 2),
+        "target": round(premium * 1.5, 2),
         "trail": False,
         "status": "OPEN"
     }
 
 def manage_trade(trade, premium):
     entry = trade["entry"]
-    if not trade["trail"] and premium >= entry*1.1:
+    if not trade["trail"] and premium >= entry * 1.1:
         trade["sl"] = entry
         trade["trail"] = True
     if trade["trail"]:
-        trade["sl"] = max(trade["sl"], premium*0.95)
+        trade["sl"] = max(trade["sl"], premium * 0.95)
     if premium <= trade["sl"]:
         trade["status"] = "SL HIT"
     if premium >= trade["target"]:
@@ -111,34 +130,46 @@ def manage_trade(trade, premium):
     return trade
 
 # ================= DATA =================
-def fetch(symbol, interval, paper=False):
+def fetch(symbol, interval):
     yf_symbol = INDEX_MAP[symbol]
-    if paper:  # Use fake data for testing when market is closed
-        now = datetime.now()
-        df = pd.DataFrame({
-            "Datetime": [now - timedelta(minutes=i*5) for i in range(100)][::-1],
-            "Close": [10000 + i*2 for i in range(100)]
-        })
-    else:
+    try:
         df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
+        if df.empty:
+            raise Exception("No data")
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df.reset_index()
-    return df
+        # Save to cache
+        df.to_csv(f"{CACHE_DIR}/{symbol}_{interval}.csv", index=False)
+        return df, True
+    except:
+        # Load from cache if live fails
+        cache_file = f"{CACHE_DIR}/{symbol}_{interval}.csv"
+        if os.path.exists(cache_file):
+            df = pd.read_csv(cache_file)
+            df["Datetime"] = pd.to_datetime(df["Datetime"])
+            return df, False
+        return pd.DataFrame(), False
 
 # ================= API =================
 @app.get("/")
 def health():
-    return {"status":"ok"}
+    return {"status": "ok"}
 
 @app.get("/chart/{symbol}")
-def chart(symbol: str, paper: bool = Query(False)):
+def chart(symbol: str):
     symbol = symbol.upper()
     if symbol not in INDEX_MAP:
-        return {"error":"Only index options supported"}
+        return {"error": "Only index options supported"}
 
-    df5 = add_indicators(fetch(symbol, "5m", paper=paper))
-    df15 = add_indicators(fetch(symbol, "15m", paper=paper))
+    df5, live5 = fetch(symbol, "5m")
+    df15, live15 = fetch(symbol, "15m")
+
+    if df5.empty or df15.empty:
+        return {"error": "No data available"}
+
+    df5 = add_indicators(df5)
+    df15 = add_indicators(df15)
 
     capital = START_CAPITAL
     trade = None
@@ -151,37 +182,47 @@ def chart(symbol: str, paper: bool = Query(False)):
 
         row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
         prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
+
         row15 = {"EMA9": safe(r15["EMA9"]), "EMA21": safe(r15["EMA21"]), "RSI": safe(r15["RSI"])}
         prev15 = {"EMA9": safe(p15["EMA9"]), "EMA21": safe(p15["EMA21"]), "RSI": safe(p15["RSI"])}
 
-        signal = final_signal(row5, prev5) if final_signal(row5, prev5) == final_signal(row15, prev15) else "NONE"
+        sig5 = final_signal(row5, prev5)
+        sig15 = final_signal(row15, prev15)
+        signal = sig5 if sig5 == sig15 else "NONE"
 
         spot = safe(r5["Close"])
         premium = option_premium(spot)
 
-        if trade is None and signal != "NONE":
-            trade = start_option_trade(signal, spot, symbol)
+        if trade is None and signal != "NONE" and live5 and live15:
+            trade = start_option_trade(signal, spot, symbol, mode="ATM")
 
         if trade:
             trade = manage_trade(trade, premium)
             if trade["status"] != "OPEN":
                 pnl = premium - trade["entry"]
                 capital += pnl
-                journal.append({**trade, "exit": round(premium,2), "pnl": round(pnl,2)})
+                journal.append({**trade, "exit": round(premium, 2), "pnl": round(pnl, 2)})
                 trade = None
 
         candles.append({
             "time": r5["Datetime"].isoformat(),
             "spot": spot,
-            "premium": round(premium,2),
+            "premium": round(premium, 2),
             "signal": signal,
-            "capital": round(capital,2),
+            "capital": round(capital, 2),
             "trade": trade
         })
 
+    message = None
+    if not live5 or not live15:
+        last_time = df5["Datetime"].max()
+        message = f"MARKET CLOSED: showing previous data captured on {last_time.strftime('%d-%b-%Y %H:%M')}"
+
     return {
         "symbol": symbol,
-        "capital": round(capital,2),
+        "capital": round(capital, 2),
         "journal": journal,
-        "candles": candles[-120:]
-    }
+        "candles": candles[-120:],
+        "message": message,
+        "last_data_time": str(df5["Datetime"].max())
+            }
