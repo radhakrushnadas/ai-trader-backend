@@ -2,13 +2,12 @@ from fastapi import FastAPI
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
-import os
 
-app = FastAPI()
+app = FastAPI(title="AI Trader Backend")
 
 # ================= CONFIG =================
+
 START_CAPITAL = 100000
-CACHE_DIR = "cache_data"  # store cached CSVs
 
 INDEX_MAP = {
     "NIFTY": "^NSEI",
@@ -22,9 +21,8 @@ STRIKE_STEP = {
     "BANKNIFTY": 100
 }
 
-os.makedirs(CACHE_DIR, exist_ok=True)
-
 # ================= UTIL =================
+
 def safe(v):
     try:
         if v is None or pd.isna(v):
@@ -44,6 +42,7 @@ def next_expiry():
     return (today + timedelta(days=days)).strftime("%d-%b-%Y")
 
 # ================= INDICATORS =================
+
 def add_indicators(df):
     df["EMA9"] = df["Close"].ewm(span=9).mean()
     df["EMA21"] = df["Close"].ewm(span=21).mean()
@@ -56,6 +55,7 @@ def add_indicators(df):
     return df
 
 # ================= STRATEGY =================
+
 def ema_signal(row, prev):
     if prev is None:
         return "NONE"
@@ -80,6 +80,7 @@ def final_signal(row, prev):
     return s1 if s1 == s2 else "NONE"
 
 # ================= OPTION LOGIC =================
+
 def option_premium(spot):
     return max(40, spot * 0.004)
 
@@ -96,14 +97,12 @@ def pick_strike(spot, step, mode):
         return atm + step
     return atm
 
-def start_option_trade(signal, spot, symbol, mode="ATM"):
+def start_option_trade(signal, spot, symbol):
     step = STRIKE_STEP[symbol]
     opt_type = "CE" if signal == "BUY" else "PE"
-    strike = pick_strike(spot, step, mode)
+    strike = pick_strike(spot, step, "ATM")
     premium = option_premium(spot)
-    delta = option_delta(opt_type)
-    if abs(delta) < 0.4:
-        return None
+
     return {
         "symbol": symbol,
         "expiry": next_expiry(),
@@ -118,43 +117,56 @@ def start_option_trade(signal, spot, symbol, mode="ATM"):
 
 def manage_trade(trade, premium):
     entry = trade["entry"]
+
     if not trade["trail"] and premium >= entry * 1.1:
         trade["sl"] = entry
         trade["trail"] = True
+
     if trade["trail"]:
         trade["sl"] = max(trade["sl"], premium * 0.95)
+
     if premium <= trade["sl"]:
         trade["status"] = "SL HIT"
+
     if premium >= trade["target"]:
         trade["status"] = "TARGET HIT"
+
     return trade
 
 # ================= DATA =================
+
 def fetch(symbol, interval):
     yf_symbol = INDEX_MAP[symbol]
-    try:
-        df = yf.download(yf_symbol, interval=interval, period="7d", progress=False)
-        if df.empty:
-            raise Exception("No data")
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df = df.reset_index()
-        # Save to cache
-        df.to_csv(f"{CACHE_DIR}/{symbol}_{interval}.csv", index=False)
-        return df, True
-    except:
-        # Load from cache if live fails
-        cache_file = f"{CACHE_DIR}/{symbol}_{interval}.csv"
-        if os.path.exists(cache_file):
-            df = pd.read_csv(cache_file)
-            df["Datetime"] = pd.to_datetime(df["Datetime"])
-            return df, False
-        return pd.DataFrame(), False
+    df = yf.download(
+        yf_symbol,
+        interval=interval,
+        period="7d",
+        progress=False
+    )
+
+    if df.empty:
+        return None, None
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df = df.reset_index()
+    last_time = df.iloc[-1]["Datetime"]
+    return df, last_time
 
 # ================= API =================
+
 @app.get("/")
 def health():
     return {"status": "ok"}
+
+@app.get("/check-yahoo")
+def check_yahoo():
+    df = yf.download("^NSEI", interval="5m", period="1d", progress=False)
+    return {
+        "rows_received": len(df),
+        "last_index": str(df.index[-1]) if len(df) > 0 else None
+    }
 
 @app.get("/chart/{symbol}")
 def chart(symbol: str):
@@ -162,11 +174,15 @@ def chart(symbol: str):
     if symbol not in INDEX_MAP:
         return {"error": "Only index options supported"}
 
-    df5, live5 = fetch(symbol, "5m")
-    df15, live15 = fetch(symbol, "15m")
+    df5, last5 = fetch(symbol, "5m")
+    df15, last15 = fetch(symbol, "15m")
 
-    if df5.empty or df15.empty:
-        return {"error": "No data available"}
+    if df5 is None or df15 is None:
+        return {
+            "status": "MARKET_CLOSED_OR_DATA_BLOCKED",
+            "message": "Yahoo Finance returned no data",
+            "last_available_data": str(last5) if last5 else None
+        }
 
     df5 = add_indicators(df5)
     df15 = add_indicators(df15)
@@ -193,8 +209,8 @@ def chart(symbol: str):
         spot = safe(r5["Close"])
         premium = option_premium(spot)
 
-        if trade is None and signal != "NONE" and live5 and live15:
-            trade = start_option_trade(signal, spot, symbol, mode="ATM")
+        if trade is None and signal != "NONE":
+            trade = start_option_trade(signal, spot, symbol)
 
         if trade:
             trade = manage_trade(trade, premium)
@@ -213,16 +229,10 @@ def chart(symbol: str):
             "trade": trade
         })
 
-    message = None
-    if not live5 or not live15:
-        last_time = df5["Datetime"].max()
-        message = f"MARKET CLOSED: showing previous data captured on {last_time.strftime('%d-%b-%Y %H:%M')}"
-
     return {
         "symbol": symbol,
         "capital": round(capital, 2),
+        "last_data_time": str(last5),
         "journal": journal,
-        "candles": candles[-120:],
-        "message": message,
-        "last_data_time": str(df5["Datetime"].max())
-            }
+        "candles": candles[-120:]
+    }
