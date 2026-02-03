@@ -2,8 +2,9 @@ from fastapi import FastAPI
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
+import math
 
-app = FastAPI(title="AI Trader Backend")
+app = FastAPI()
 
 # ================= CONFIG =================
 
@@ -84,17 +85,28 @@ def final_signal(row, prev):
 def option_premium(spot):
     return max(40, spot * 0.004)
 
-def option_delta(opt_type):
-    return 0.55 if opt_type == "CE" else -0.55
+def option_delta(option_type):
+    return 0.55 if option_type == "CE" else -0.55
 
-def pick_strike(spot, step):
-    return nearest_strike(spot, step)
+def pick_strike(spot, step, mode):
+    atm = nearest_strike(spot, step)
+    if mode == "ATM":
+        return atm
+    if mode == "ITM":
+        return atm - step
+    if mode == "OTM":
+        return atm + step
+    return atm
 
-def start_option_trade(signal, spot, symbol):
+def start_option_trade(signal, spot, symbol, mode="ATM"):
     step = STRIKE_STEP[symbol]
     opt_type = "CE" if signal == "BUY" else "PE"
-    strike = pick_strike(spot, step)
+    strike = pick_strike(spot, step, mode)
     premium = option_premium(spot)
+    delta = option_delta(opt_type)
+
+    if abs(delta) < 0.4:
+        return None  # Delta filter
 
     return {
         "symbol": symbol,
@@ -128,75 +140,43 @@ def manage_trade(trade, premium):
 
 # ================= DATA FETCH =================
 
-def fetch(symbol, interval):
+def fetch(symbol, interval="5m", period="7d"):
     yf_symbol = INDEX_MAP[symbol]
-
     try:
-        df = yf.download(
-            yf_symbol,
-            interval=interval,
-            period="7d",
-            progress=False,
-            threads=False
-        )
-    except:
-        df = None
-
-    data_mode = "LIVE"
-
-    if df is None or df.empty:
-        try:
-            df = yf.download(
-                yf_symbol,
-                interval="1d",
-                period="2d",
-                progress=False,
-                threads=False
-            )
-            data_mode = "LAST_DAY"
-        except:
-            return None, None, "NO DATA"
-
-    if df is None or df.empty:
-        return None, None, "NO DATA"
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df = df.reset_index()
-    last_time = df.iloc[-1].get("Datetime") or df.iloc[-1].get("Date")
-
-    return df, last_time, data_mode
-
-def market_status(last_time):
-    if last_time is None:
-        return "NO DATA"
-    if datetime.now() - last_time > timedelta(minutes=20):
-        return "MARKET CLOSED"
-    return "MARKET LIVE"
+        df = yf.download(yf_symbol, interval=interval, period=period, progress=False)
+        if df.empty:
+            raise ValueError("Empty data")
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.reset_index()
+        return df, "LIVE"
+    except Exception as e:
+        # Fallback to last available daily candle
+        df = yf.download(yf_symbol, interval="1d", period="5d", progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.reset_index()
+        return df, "MARKET CLOSED"
 
 # ================= API =================
 
 @app.get("/")
-def root():
-    return {"status": "AI Trader Backend Running"}
+def health():
+    return {"status": "ok"}
 
 @app.get("/chart/{symbol}")
 def chart(symbol: str):
     symbol = symbol.upper()
     if symbol not in INDEX_MAP:
-        return {"error": "Invalid symbol"}
+        return {"error": "Only index options supported"}
 
-    df5, last5, mode5 = fetch(symbol, "5m")
-    df15, last15, mode15 = fetch(symbol, "15m")
+    df5, status5 = fetch(symbol, "5m")
+    df15, status15 = fetch(symbol, "15m")
 
-    if df5 is None or df15 is None:
-        return {"error": "Yahoo Finance not responding"}
+    market_status = "LIVE" if status5 == "LIVE" and status15 == "LIVE" else "MARKET CLOSED"
 
     df5 = add_indicators(df5)
     df15 = add_indicators(df15)
-
-    status = market_status(last5)
 
     capital = START_CAPITAL
     trade = None
@@ -204,8 +184,8 @@ def chart(symbol: str):
     candles = []
 
     for i in range(1, min(len(df5), len(df15))):
-        r5, p5 = df5.iloc[i], df5.iloc[i - 1]
-        r15, p15 = df15.iloc[i], df15.iloc[i - 1]
+        r5, p5 = df5.iloc[i], df5.iloc[i-1]
+        r15, p15 = df15.iloc[i], df15.iloc[i-1]
 
         row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
         prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
@@ -215,13 +195,14 @@ def chart(symbol: str):
 
         sig5 = final_signal(row5, prev5)
         sig15 = final_signal(row15, prev15)
+
         signal = sig5 if sig5 == sig15 else "NONE"
 
         spot = safe(r5["Close"])
         premium = option_premium(spot)
 
         if trade is None and signal != "NONE":
-            trade = start_option_trade(signal, spot, symbol)
+            trade = start_option_trade(signal, spot, symbol, mode="ATM")
 
         if trade:
             trade = manage_trade(trade, premium)
@@ -232,18 +213,20 @@ def chart(symbol: str):
                 trade = None
 
         candles.append({
-            "time": (r5.get("Datetime") or r5.get("Date")).isoformat(),
+            "time": r5["Datetime"].isoformat(),
             "spot": spot,
             "premium": round(premium, 2),
             "signal": signal,
-            "capital": round(capital, 2)
+            "capital": round(capital, 2),
+            "trade": trade
         })
+
+    last_data_time = df5["Datetime"].iloc[-1].isoformat() if not df5.empty else None
 
     return {
         "symbol": symbol,
-        "market_status": status,
-        "data_mode": "LIVE" if status == "MARKET LIVE" else "LAST ONE DAY DATA",
-        "last_data_time": last5.isoformat() if last5 else None,
+        "market_status": market_status,
+        "last_data_time": last_data_time,
         "capital": round(capital, 2),
         "journal": journal,
         "candles": candles[-120:]
