@@ -84,23 +84,16 @@ def final_signal(row, prev):
 def option_premium(spot):
     return max(40, spot * 0.004)
 
-def option_delta(option_type):
-    return 0.55 if option_type == "CE" else -0.55
+def option_delta(opt_type):
+    return 0.55 if opt_type == "CE" else -0.55
 
-def pick_strike(spot, step, mode):
-    atm = nearest_strike(spot, step)
-    if mode == "ATM":
-        return atm
-    if mode == "ITM":
-        return atm - step
-    if mode == "OTM":
-        return atm + step
-    return atm
+def pick_strike(spot, step):
+    return nearest_strike(spot, step)
 
 def start_option_trade(signal, spot, symbol):
     step = STRIKE_STEP[symbol]
     opt_type = "CE" if signal == "BUY" else "PE"
-    strike = pick_strike(spot, step, "ATM")
+    strike = pick_strike(spot, step)
     premium = option_premium(spot)
 
     return {
@@ -133,59 +126,77 @@ def manage_trade(trade, premium):
 
     return trade
 
-# ================= DATA =================
+# ================= DATA FETCH =================
 
 def fetch(symbol, interval):
     yf_symbol = INDEX_MAP[symbol]
-    df = yf.download(
-        yf_symbol,
-        interval=interval,
-        period="7d",
-        progress=False
-    )
 
-    if df.empty:
-        return None, None
+    try:
+        df = yf.download(
+            yf_symbol,
+            interval=interval,
+            period="7d",
+            progress=False,
+            threads=False
+        )
+    except:
+        df = None
+
+    data_mode = "LIVE"
+
+    if df is None or df.empty:
+        try:
+            df = yf.download(
+                yf_symbol,
+                interval="1d",
+                period="2d",
+                progress=False,
+                threads=False
+            )
+            data_mode = "LAST_DAY"
+        except:
+            return None, None, "NO DATA"
+
+    if df is None or df.empty:
+        return None, None, "NO DATA"
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     df = df.reset_index()
-    last_time = df.iloc[-1]["Datetime"]
-    return df, last_time
+    last_time = df.iloc[-1].get("Datetime") or df.iloc[-1].get("Date")
+
+    return df, last_time, data_mode
+
+def market_status(last_time):
+    if last_time is None:
+        return "NO DATA"
+    if datetime.now() - last_time > timedelta(minutes=20):
+        return "MARKET CLOSED"
+    return "MARKET LIVE"
 
 # ================= API =================
 
 @app.get("/")
-def health():
-    return {"status": "ok"}
-
-@app.get("/check-yahoo")
-def check_yahoo():
-    df = yf.download("^NSEI", interval="5m", period="1d", progress=False)
-    return {
-        "rows_received": len(df),
-        "last_index": str(df.index[-1]) if len(df) > 0 else None
-    }
+def root():
+    return {"status": "AI Trader Backend Running"}
 
 @app.get("/chart/{symbol}")
 def chart(symbol: str):
     symbol = symbol.upper()
     if symbol not in INDEX_MAP:
-        return {"error": "Only index options supported"}
+        return {"error": "Invalid symbol"}
 
-    df5, last5 = fetch(symbol, "5m")
-    df15, last15 = fetch(symbol, "15m")
+    df5, last5, mode5 = fetch(symbol, "5m")
+    df15, last15, mode15 = fetch(symbol, "15m")
 
     if df5 is None or df15 is None:
-        return {
-            "status": "MARKET_CLOSED_OR_DATA_BLOCKED",
-            "message": "Yahoo Finance returned no data",
-            "last_available_data": str(last5) if last5 else None
-        }
+        return {"error": "Yahoo Finance not responding"}
 
     df5 = add_indicators(df5)
     df15 = add_indicators(df15)
+
+    status = market_status(last5)
 
     capital = START_CAPITAL
     trade = None
@@ -193,8 +204,8 @@ def chart(symbol: str):
     candles = []
 
     for i in range(1, min(len(df5), len(df15))):
-        r5, p5 = df5.iloc[i], df5.iloc[i-1]
-        r15, p15 = df15.iloc[i], df15.iloc[i-1]
+        r5, p5 = df5.iloc[i], df5.iloc[i - 1]
+        r15, p15 = df15.iloc[i], df15.iloc[i - 1]
 
         row5 = {"EMA9": safe(r5["EMA9"]), "EMA21": safe(r5["EMA21"]), "RSI": safe(r5["RSI"])}
         prev5 = {"EMA9": safe(p5["EMA9"]), "EMA21": safe(p5["EMA21"]), "RSI": safe(p5["RSI"])}
@@ -221,18 +232,19 @@ def chart(symbol: str):
                 trade = None
 
         candles.append({
-            "time": r5["Datetime"].isoformat(),
+            "time": (r5.get("Datetime") or r5.get("Date")).isoformat(),
             "spot": spot,
             "premium": round(premium, 2),
             "signal": signal,
-            "capital": round(capital, 2),
-            "trade": trade
+            "capital": round(capital, 2)
         })
 
     return {
         "symbol": symbol,
+        "market_status": status,
+        "data_mode": "LIVE" if status == "MARKET LIVE" else "LAST ONE DAY DATA",
+        "last_data_time": last5.isoformat() if last5 else None,
         "capital": round(capital, 2),
-        "last_data_time": str(last5),
         "journal": journal,
         "candles": candles[-120:]
     }
